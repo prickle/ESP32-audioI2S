@@ -350,6 +350,7 @@ void Audio::setDefaults() {
     m_audioFileDuration = 0;
     m_audioDataStart = 0;
     m_audioDataSize = 0;
+    m_audioDataCount = 0;  // Nick Metcalfe 5/2024 -- want m_audioDataCount
     m_avr_bitrate = 0;     // the same as m_bitrate if CBR, median if VBR
     m_bitRate = 0;         // Bitrate still unknown
     m_bytesNotDecoded = 0; // counts all not decodable bytes
@@ -470,7 +471,7 @@ bool Audio::openai_speech(const String& api_key, const String& model, const Stri
 }
 
 //------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-bool Audio::connecttohost(const char* host, const char* user, const char* pwd) {
+bool Audio::connecttohost(const char* host, const char* user, const char* pwd, bool metadata) {
     // user and pwd for authentification only, can be empty
 
     xSemaphoreTakeRecursive(mutex_audio, portMAX_DELAY);
@@ -484,7 +485,7 @@ bool Audio::connecttohost(const char* host, const char* user, const char* pwd) {
 
     uint16_t lenHost = strlen(host);
 
-    if(lenHost >= 512 - 10) {
+    if(lenHost >= 1024 - 10) {                      //Nick Metcalfe 2/24 - FTP paths can be longer
         AUDIO_INFO("Hostaddress is too long");
         stopSong();
         xSemaphoreGiveRecursive(mutex_audio);
@@ -492,7 +493,9 @@ bool Audio::connecttohost(const char* host, const char* user, const char* pwd) {
     }
 
     int   idx = indexOf(host, "http");
-    char* l_host = (char*)malloc(lenHost + 10);
+    char* l_host;
+    if (m_f_psram) l_host = (char*)ps_malloc(lenHost + 10);        //Nick Metcalfe 2/24 - save memory
+    else l_host = (char*)malloc(lenHost + 10);
     if(idx < 0) {
         strcpy(l_host, "http://");
         strcat(l_host, host);
@@ -513,17 +516,25 @@ bool Audio::connecttohost(const char* host, const char* user, const char* pwd) {
     pos_slash = indexOf(h_host, "/", 0);
     pos_colon = indexOf(h_host, ":", 0);
     if(isalpha(h_host[pos_colon + 1])) pos_colon = -1; // no portnumber follows
+    //Nick Metcalfe 2/24 handle case of "https://s22.myradiostream.com/:15152/listen.mp3?nocache=1708536684"
+    int8_t trailingSlash = 0;
+    if (pos_colon > 1 && pos_slash == pos_colon - 1) {
+        trailingSlash = 1;
+        pos_slash = indexOf(h_host, "/", pos_slash);
+    }  
     pos_ampersand = indexOf(h_host, "&", 0);
 
     char* hostwoext = NULL; // "skonto.ls.lv:8002" in "skonto.ls.lv:8002/mp3"
     char* extension = NULL; // "/mp3" in "skonto.ls.lv:8002/mp3"
 
     if(pos_slash > 1) {
-        hostwoext = (char*)malloc(pos_slash + 1);
+        if (m_f_psram) hostwoext = (char*)ps_malloc(pos_slash + 1);        //Nick Metcalfe 2/24 - save memory
+        else hostwoext = (char*)malloc(pos_slash + 1);
         memcpy(hostwoext, h_host, pos_slash);
         hostwoext[pos_slash] = '\0';
         uint16_t extLen = urlencode_expected_len(h_host + pos_slash);
-        extension = (char*)malloc(extLen + 20);
+        if (m_f_psram) extension = (char *)ps_malloc(extLen + 20);        //Nick Metcalfe 2/24 - save memory
+        else extension = (char *)malloc(extLen + 20);
         memcpy(extension, h_host + pos_slash, extLen);
         urlencode(extension, extLen, true);
     }
@@ -534,7 +545,7 @@ bool Audio::connecttohost(const char* host, const char* user, const char* pwd) {
 
     if((pos_colon >= 0) && ((pos_ampersand == -1) || (pos_ampersand > pos_colon))) {
         port = atoi(h_host + pos_colon + 1); // Get portnumber as integer
-        hostwoext[pos_colon] = '\0';         // Host without portnumber
+        hostwoext[pos_colon - trailingSlash] = '\0';         // Host without portnumber
     }
 
     AUDIO_INFO("Connect to new host: \"%s\"", l_host);
@@ -557,27 +568,47 @@ bool Audio::connecttohost(const char* host, const char* user, const char* pwd) {
 
     //  AUDIO_INFO("Connect to \"%s\" on port %d, extension \"%s\"", hostwoext, port, extension);
 
-    char rqh[strlen(h_host) + strlen(authorization) + 220]; // http request header
+    // http request header
+    char* rqh; //[strlen(h_host) + strlen(authorization) + 500];   //Nick Metcalfe 2/24 - save memory - this got big
+    if (m_f_psram) rqh = (char*)ps_malloc(strlen(h_host) + strlen(authorization) + 500);
+    else rqh = (char*)malloc(strlen(h_host) + strlen(authorization) + 500);
     rqh[0] = '\0';
 
     strcat(rqh, "GET ");
     strcat(rqh, extension);
-    strcat(rqh, " HTTP/1.1\r\n");
-    strcat(rqh, "Host: ");
-    strcat(rqh, hostwoext);
-    strcat(rqh, "\r\n");
-    strcat(rqh, "Icy-MetaData:1\r\n");
-    strcat(rqh, "Icy-MetaData:2\r\n");
-
-    if(auth > 0) {
-        strcat(rqh, "Authorization: Basic ");
-        strcat(rqh, authorization);
+    //Nick Metcalfe 2/2024 "metadata" option - metadata can be disabled to stream podcast files
+    if (metadata) {  //Regular style
+        strcat(rqh, " HTTP/1.1\r\n");
+        strcat(rqh, "Host: ");
+        strcat(rqh, hostwoext);
         strcat(rqh, "\r\n");
-    }
+        strcat(rqh, "Icy-MetaData:1\r\n");
+        strcat(rqh, "Icy-MetaData:2\r\n");
 
-    strcat(rqh, "Accept-Encoding: identity;q=1,*;q=0\r\n");
-    //    strcat(rqh, "User-Agent: Mozilla/5.0\r\n"); #363
-    strcat(rqh, "Connection: keep-alive\r\n\r\n");
+        if(auth > 0) {
+            strcat(rqh, "Authorization: Basic ");
+            strcat(rqh, authorization);
+            strcat(rqh, "\r\n");
+        }
+
+        strcat(rqh, "Accept-Encoding: identity;q=1,*;q=0\r\n");
+        //    strcat(rqh, "User-Agent: Mozilla/5.0\r\n"); #363
+        strcat(rqh, "Connection: keep-alive\r\n\r\n");
+
+    //Nick Metcalfe 2/2024 fix for "open.live.bbc.co.uk" returning 403 forbidden
+    } else { //Let's pretend to be firefox to fool BBC iPlayer - copied from firefox 122.0 request header
+      strcat(rqh, " HTTP/1.1\r\n");
+      strcat(rqh, "Host: ");
+      strcat(rqh, hostwoext);
+      strcat(rqh, "\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0\r\n");
+      strcat(rqh, "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8\r\n");
+      strcat(rqh, "Accept-Language: en-US,en;q=0.5\r\n");
+      strcat(rqh, "Accept-Encoding: gzip, deflate\r\n");
+      strcat(rqh, "Upgrade-Insecure-Requests: 1\r\n");
+//    strcat(rqh, "Transfer-Encoding: \r\n");  // otherwise the server assumes gzip compression
+      strcat(rqh, "Connection: close\r\n\r\n");
+
+    }
 
     //    if(ESP_ARDUINO_VERSION_MAJOR == 2 && ESP_ARDUINO_VERSION_MINOR == 0 && ESP_ARDUINO_VERSION_PATCH >= 3){
     //        m_timeout_ms_ssl = UINT16_MAX;  // bug in v2.0.3 if hostwoext is a IPaddr not a name
@@ -630,11 +661,15 @@ bool Audio::connecttohost(const char* host, const char* user, const char* pwd) {
     }
     else {
         AUDIO_INFO("Request %s failed!", l_host);
-        if(audio_showstation) audio_showstation("");
-        if(audio_showstreamtitle) audio_showstreamtitle("");
-        if(audio_icydescription) audio_icydescription("");
-        if(audio_icyurl) audio_icyurl("");
+        //if(audio_showstation) audio_showstation("");      //Nick Metcalfe 2/24 - Don't react to failed requests
+        //if(audio_showstreamtitle) audio_showstreamtitle("");
+        //if(audio_icydescription) audio_icydescription("");
+        //if(audio_icyurl) audio_icyurl("");
         m_lastHost[0] = 0;
+    }
+    if(rqh) {
+        free(rqh);
+        rqh = NULL;
     }
     if(hostwoext) {
         free(hostwoext);
@@ -818,6 +853,7 @@ bool Audio::connecttoFS(fs::FS& fs, const char* path, int32_t fileStartPos) {
 
     xSemaphoreTakeRecursive(mutex_audio, portMAX_DELAY); // #3
 
+    if (&fs == &SD) m_f_sdtype = true;      //Nick Metcalfe 5/2024 -- Detect SDFS types 
     m_fileStartPos = fileStartPos;
     setDefaults(); // free buffers an set defaults
 
@@ -845,6 +881,11 @@ bool Audio::connecttoFS(fs::FS& fs, const char* path, int32_t fileStartPos) {
 
     if(!audiofile) {
         printProcessLog(AUDIOLOG_FILE_READ_ERR, audioPath);
+        //Nick Metcalfe 3/2024 - want an EOF on file error
+        char *afn =strdup(audiofile.name()); // store temporary the name
+        AUDIO_INFO("Invalid file \"%s\"", afn);
+        if(audio_eof_mp3) audio_eof_mp3(afn);
+        if(afn) free(afn);
         free(audioPath);
         xSemaphoreGiveRecursive(mutex_audio);
         return false;
@@ -3045,6 +3086,7 @@ void Audio::processLocalFile() {
 
     if(m_f_firstCall) { // runs only one time per connection, prepare for start
         m_f_firstCall = false;
+        m_audioDataCount = 0;
         f_stream = false;
         f_fileDataComplete = false;
         byteCounter = 0;
@@ -3065,6 +3107,9 @@ void Audio::processLocalFile() {
     if(m_audioDataSize) { availableBytes = min(availableBytes, m_audioDataSize + m_audioDataStart - byteCounter); }
 
     int32_t bytesAddedToBuffer = audiofile.read(InBuff.getWritePtr(), availableBytes);
+
+    //Use real EOF on non-SD filesystems, Nick Metcalfe 3/24 
+    if(m_f_sdtype && bytesAddedToBuffer == 0) bytesAddedToBuffer = -1; //eof
 
     if(bytesAddedToBuffer > 0) {
         byteCounter += bytesAddedToBuffer; // Pull request #42
@@ -3094,6 +3139,11 @@ void Audio::processLocalFile() {
         if(m_controlCounter != 100) {
             if((millis() - ctime) > timeout) {
                 log_e("audioHeader reading timeout");
+                //Nick Metcalfe 3/2024 we want end-of-file notification on error
+                char *afn =strdup(audiofile.name()); // store temporary the name
+                AUDIO_INFO("Invalid file \"%s\"", afn);
+                if(audio_eof_mp3) audio_eof_mp3(afn);
+                if(afn) free(afn);
                 m_f_running = false;
                 return;
             }
@@ -3211,6 +3261,7 @@ exit:
     }
     if(byteCounter == audiofile.size()) { f_fileDataComplete = true; }
     if(byteCounter == m_audioDataSize + m_audioDataStart) { f_fileDataComplete = true; }
+    if(bytesAddedToBuffer == -1) { f_fileDataComplete = true; } //Nick Metcalfe 5/2024 -- handle real EOF
     // play audio data - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
     if(f_stream) { playAudioData(); }
 }
@@ -3223,6 +3274,7 @@ void Audio::processWebStream() {
     // first call, set some values to default  - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
     if(m_f_firstCall) { // runs only ont time per connection, prepare for start
         m_f_firstCall = false;
+        m_audioDataCount = 0;
         f_stream = false;
         chunkSize = 0;
         m_metacount = m_metaint;
@@ -3305,6 +3357,7 @@ void Audio::processWebFile() {
     if(m_f_firstCall) { // runs only ont time per connection, prepare for start
         m_f_firstCall = false;
         m_t0 = millis();
+        m_audioDataCount = 0;
         f_webFileDataComplete = false;
         f_stream = false;
         byteCounter = 0;
@@ -3447,6 +3500,7 @@ void Audio::processWebStreamTS() {
         f_stream = false;
         f_firstPacket = true;
         f_chunkFinished = false;
+        m_audioDataCount = 0;
         byteCounter = 0;
         chunkSize = 0;
         m_t0 = millis();
@@ -3560,6 +3614,7 @@ void Audio::processWebStreamHLS() {
     if(m_f_firstCall) { // runs only ont time per connection, prepare for start
         f_stream = false;
         f_chunkFinished = false;
+        m_audioDataCount = 0;
         byteCounter = 0;
         chunkSize = 0;
         ID3WritePtr = 0;
@@ -3670,12 +3725,16 @@ void Audio::playAudioData() {
     if(InBuff.bufferFilled() < InBuff.getMaxBlockSize()) return; // guard
 
     int bytesDecoded = sendBytes(InBuff.getReadPtr(), InBuff.getMaxBlockSize());
+    
+    if(m_streamType == ST_WEBFILE && bytesDecoded > 0) 
+      m_audioDataCount += bytesDecoded;      //Nick Metcalfe 5/2024 -- want m_audioDataCount
 
     if(bytesDecoded < 0) { // no syncword found or decode error, try next chunk
         log_i("err bytesDecoded %i", bytesDecoded);
         uint8_t next = 200;
         if(InBuff.bufferFilled() < next) next = InBuff.bufferFilled();
         InBuff.bytesWasRead(next); // try next chunk
+        if(m_streamType == ST_WEBFILE) m_audioDataCount += next; //Nick Metcalfe 5/2024 -- want m_audioDataCount
         m_bytesNotDecoded += next;
     }
     else {
@@ -4805,6 +4864,7 @@ bool Audio::setPinout(uint8_t BCLK, uint8_t LRC, uint8_t DOUT, int8_t MCLK) {
 }
 //------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 uint32_t Audio::getFileSize() { // returns the size of webfile or local file
+    if(m_streamType == ST_WEBFILE) return m_audioDataSize; //Nick Metcalfe 2/2024 for podcast progressbar
     if(!audiofile) {
         if (m_contentlength > 0) { return m_contentlength;}
         return 0;
@@ -4813,6 +4873,7 @@ uint32_t Audio::getFileSize() { // returns the size of webfile or local file
 }
 //------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 uint32_t Audio::getFilePos() {
+    if(m_streamType == ST_WEBFILE) return m_audioDataCount;   //Nick Metcalfe 2/2024 for podcast progressbar
     if(!audiofile) return 0;
     return audiofile.position();
 }

@@ -134,7 +134,7 @@ public:
     ~Audio();
     void setBufsize(int rambuf_sz, int psrambuf_sz);
     bool openai_speech(const String& api_key, const String& model, const String& input, const String& voice, const String& response_format, const String& speed);
-    bool connecttohost(const char* host, const char* user = "", const char* pwd = "");
+    bool connecttohost(const char* host, const char* user = "", const char* pwd = "", bool metadata = true);
     bool connecttospeech(const char* speech, const char* lang);
     bool connecttoFS(fs::FS &fs, const char* path, int32_t m_fileStartPos = -1);
     bool setFileLoop(bool input);//TEST loop
@@ -176,6 +176,7 @@ public:
     int getCodec() {return m_codec;}
     const char *getCodecname() {return codecname[m_codec];}
     void unicode2utf8(char* buff, uint32_t len);
+    void setDefaults(); // free buffers and set defaults  //Make this public - Nick Metcalfe 4/24 
 
 private:
 
@@ -189,7 +190,6 @@ private:
 
   void            UTF8toASCII(char* str);
   bool            latinToUTF8(char* buff, size_t bufflen, bool UTF8check = true);
-  void            setDefaults(); // free buffers and set defaults
   void            initInBuff();
   bool            httpPrint(const char* host);
   void            processLocalFile();
@@ -519,6 +519,7 @@ private:
     uint8_t         m_expectedPlsFmt = FORMAT_NONE; // set in connecttohost (e.g. streaming01.m3u) -> FORMAT_M3U)
     uint8_t         m_filterType[2];                // lowpass, highpass
     uint8_t         m_streamType = ST_NONE;
+    bool            m_f_sdtype = true;              // Use SD card style file handling - Nick Metcalfe 3/24
     uint8_t         m_ID3Size = 0;                  // lengt of ID3frame - ID3header
     uint8_t         m_vuLeft = 0;                   // average value of samples, left channel
     uint8_t         m_vuRight = 0;                  // average value of samples, right channel
@@ -577,6 +578,7 @@ private:
     float           m_audioCurrentTime = 0;
     uint32_t        m_audioDataStart = 0;           // in bytes
     size_t          m_audioDataSize = 0;            //
+    size_t          m_audioDataCount;                             // counts the decoded audiodata only
     float           m_filterBuff[3][2][2][2];       // IIR filters memory for Audio DSP
     float           m_corr = 1.0;					// correction factor for level adjustment
     size_t          m_i2s_bytesWritten = 0;         // set in i2s_write() but not used
